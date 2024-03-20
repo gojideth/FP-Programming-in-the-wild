@@ -17,4 +17,6 @@ libraryDependencies ++= Seq(
   "com.typesafe.play" %% "play-json" % "2.10.3",
   "com.github.pureconfig" %% "pureconfig-core" % "0.17.4",
   "ch.qos.logback" % "logback-classic" % "1.4.12" % Runtime,
+  "org.typelevel" %% "cats-effect" % "3.5.0",
+  "org.typelevel" %% "cats-core" % "2.10.0"
 )
