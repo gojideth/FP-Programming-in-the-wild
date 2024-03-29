@@ -2,7 +2,7 @@ package gojideth.fp.application
 
 import cats.effect.{ IO, IOApp }
 import com.comcast.ip4s.{ host, port }
-import gojideth.fp.application.Main.domain.PublicRepos
+import gojideth.fp.application.Main.domain.{ PublicRepos, RepoName }
 import org.http4s.ember.server.EmberServerBuilder
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -58,7 +58,7 @@ object Main extends IOApp.Simple {
       .onError {
         case org.http4s.client.UnexpectedStatus(Status.Unauthorized, _, _) =>
           error"GitHub token is either expired or absent, please check `token` key in src/main/resources/application.conf"
-        case other => error"other"
+        case other => error"$other"
       }
       .handleErrorWith(_ => warn"returning default value: $default for $uri due to unexpected error" as default)
 
@@ -74,7 +74,12 @@ object Main extends IOApp.Simple {
           publicRepos <- fetch[PublicRepos](publicReposURI, client, PublicRepos.Empty)
           _ <- info"fetching the amount of available repositories for $orgName"
           pages = (1 to (publicRepos.value / 100) + 1).toVector
-          response <- Ok(s"# of public repos: ${publicRepos}, # of parallel requests: ${pages.size}")
+          repositories <- pages.parUnorderedFlatTraverse { page =>
+            uri(repos(orgName, page))
+            .flatMap(fetch[Vector[RepoName]](_, client, Vector.empty[RepoName]))
+          }
+          _ <- info"$publicRepos repositories were collected for $orgName"
+          response <- Ok(repositories.toString)
         } yield response
     }
   }
@@ -104,12 +109,11 @@ object Main extends IOApp.Simple {
 
     opaque type RepoName = String
     object RepoName {
-      val Empty: RepoName = RepoName.apply("no_name")
       def apply(repoName: String): RepoName = repoName
     }
     extension (repoName: RepoName) def value: String = repoName
 
-    given ReadsRepoName: Reads[RepoName] = (__ \ "repo_name").read[String].map(RepoName.apply)
+    given ReadsRepo: Reads[RepoName] = (__ \ "name").read[String].map(RepoName.apply)
 
     final case class Contributor(name: String, contributions: Long)
 
