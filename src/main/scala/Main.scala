@@ -1,21 +1,22 @@
 package gojideth.fp.application
 
-import cats.effect.{ IO, IOApp }
-import com.comcast.ip4s.{ host, port }
-import gojideth.fp.application.Main.domain.{ PublicRepos, RepoName }
+import cats.effect.{IO, IOApp}
+import com.comcast.ip4s.{host, port}
+import gojideth.fp.application.Main.domain.{Contributions, Contributor, PublicRepos, RepoName}
 import org.http4s.ember.server.EmberServerBuilder
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.typelevel.log4cats.syntax.LoggerInterpolator
 import org.http4s.*
 import org.http4s.Header.Raw
-import org.http4s.client.{ Client, UnexpectedStatus }
+import org.http4s.client.{Client, UnexpectedStatus}
 import org.http4s.dsl.io.*
 import org.http4s.ember.client.EmberClientBuilder
 import org.typelevel.ci.CIString
 import pureconfig.*
 import pureconfig.generic.derivation.default.*
 import cats.syntax.all.*
+import gojideth.fp.application.Main.fetch
 import play.api.libs.json.*
 import play.api.libs.*
 object Main extends IOApp.Simple {
@@ -69,21 +70,65 @@ object Main extends IOApp.Simple {
         Ok(s"Hi I don't understand anything xD $tk")
       case GET -> Root / "org" / orgName =>
         for {
+          start <- IO.realTime
           publicReposURI <- uri(publicRepos(orgName))
           _ <- info"accepted $orgName"
           publicRepos <- fetch[PublicRepos](publicReposURI, client, PublicRepos.Empty)
           _ <- info"fetching the amount of available repositories for $orgName"
           pages = (1 to (publicRepos.value / 100) + 1).toVector
           repositories <- pages.parUnorderedFlatTraverse { page =>
-            uri(repos(orgName, page))
-            .flatMap(fetch[Vector[RepoName]](_, client, Vector.empty[RepoName]))
-          }
+                            uri(repos(orgName, page))
+                              .flatMap(fetch[Vector[RepoName]](_, client, Vector.empty[RepoName]))
+                          }
           _ <- info"$publicRepos repositories were collected for $orgName"
-          response <- Ok(repositories.toString)
+          _ <- info"starting to fetch contributors for each repository"
+          contributors <- repositories
+                            .parUnorderedFlatTraverse { repoName =>
+                              for {
+                                _ <- info"fetch contributors for $repoName"
+                                contributors <- getContributorsPerRepo(client, repoName, orgName)
+
+                              } yield contributors
+                            }
+                            .map {
+                              _.groupMapReduce(_.login)(_.contributions)(_ + _).toVector
+                                .map(Contributor(_, _))
+                                .sortWith(_.contributions > _.contributions)
+                            }
+          _ <- info"returning aggregated & sorted contributors for $orgName"
+          response <- Ok(Contributions(contributors.size, contributors).toJson)
+          end <- IO.realTime
+          _ <- info"aggregation took ${(end - start).toSeconds} seconds"
         } yield response
     }
   }
 
+  private def getContributorsPerRepo(
+      client: Client[IO],
+      repoName: RepoName,
+      orgName: String,
+      contributors: Vector[Contributor] = Vector.empty[Contributor],
+      page: Int = 1,
+      isEmpty: Boolean = false
+  )(using token: Token): IO[Vector[Contributor]] =
+    if ((page > 1 && contributors.size % 100 != 0) || isEmpty) IO.pure(contributors)
+    else {
+      uri(contributorsUrl(repoName.value, orgName, page)).flatMap { contributorsUri =>
+        for {
+          _ <- info"requesting page: $page of $repoName contributors"
+          newContributors <- fetch[Vector[Contributor]](contributorsUri, client, Vector.empty)
+          _ <- info"fetched ${newContributors.size} contributors on page: $page for $repoName"
+          next <- getContributorsPerRepo(
+                    client = client,
+                    repoName = repoName,
+                    orgName = orgName,
+                    contributors = contributors ++ newContributors,
+                    page = page + 1,
+                    isEmpty = newContributors.isEmpty
+                  )
+        } yield next
+      }
+    }
   object syntax {
     extension (self: String) def into[A](using r: Reads[A]): A = Json.parse(self).as[A]
     extension [A](self: A) def toJson(using w: Writes[A]): String = Json.prettyPrint(w.writes(self))
@@ -115,7 +160,7 @@ object Main extends IOApp.Simple {
 
     given ReadsRepo: Reads[RepoName] = (__ \ "name").read[String].map(RepoName.apply)
 
-    final case class Contributor(name: String, contributions: Long)
+    final case class Contributor(login: String, contributions: Long)
 
     given ReadsContributor: Reads[Contributor] = json =>
       (
